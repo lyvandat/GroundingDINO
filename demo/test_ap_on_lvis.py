@@ -40,12 +40,14 @@ def load_model(model_config_path, model_checkpoint_path, device="cuda"):
 class LvisDetection(torch.utils.data.Dataset):
     """Trả về (image_tensor, target) — target chỉ cần image_id + orig_size để eval."""
 
-    def __init__(self, image_root, lvis_api, transforms, max_images=None):
+    def __init__(self, image_root, lvis_api, transforms, max_images=None,
+                 num_shards=1, shard_id=0):
         self.image_root = image_root
         self.lvis = lvis_api
         ids = sorted(lvis_api.get_img_ids())
         if max_images is not None:
             ids = ids[:max_images]
+        ids = ids[shard_id::num_shards]   # chia deu kieu xen ke cho da-GPU
         self.ids = ids
         self._transforms = transforms
 
@@ -150,14 +152,34 @@ def decode_chunk(outputs, target_sizes, positive_map, chunk_ids, num_select=300)
     return res
 
 
-def main(args):
-    device = args.device
-    cfg = SLConfig.fromfile(args.config_file)
+def run_eval(lvis_api, results, img_ids):
+    if len(results) == 0:
+        print("Khong co detection nao -> bo qua eval.")
+        return
+    lvis_dt = LVISResults(lvis_api, results, max_dets=300)
+    lvis_eval = LVISEval(lvis_api, lvis_dt, "bbox")
+    lvis_eval.params.img_ids = sorted(set(img_ids))   # chi cham tren cac anh da chay
+    lvis_eval.run()
+    lvis_eval.print_results()
 
+
+def main(args):
+    lvis_api = LVIS(args.anno_path)
+
+    # ----- Che do chi gop + eval (sau khi cac shard da luu json) -----
+    if args.eval_only:
+        results = []
+        for f in args.dets:
+            results += json.load(open(f))
+        print(f"Da nap {len(results)} detections tu {len(args.dets)} file.")
+        run_eval(lvis_api, results, [r["image_id"] for r in results])
+        return
+
+    device = args.device
+    assert args.config_file and args.checkpoint_path, "Can -c va -p khi chay inference"
+    cfg = SLConfig.fromfile(args.config_file)
     model = load_model(args.config_file, args.checkpoint_path, device).to(device).eval()
     tokenizer = get_tokenlizer.get_tokenlizer(cfg.text_encoder_type)
-
-    lvis_api = LVIS(args.anno_path)
 
     # danh sách category theo thứ tự id tăng dần
     cat_ids = sorted(lvis_api.cats.keys())
@@ -173,7 +195,8 @@ def main(args):
         T.ToTensor(),
         T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
-    dataset = LvisDetection(args.image_root, lvis_api, transform, max_images=args.max_images)
+    dataset = LvisDetection(args.image_root, lvis_api, transform, max_images=args.max_images,
+                            num_shards=args.num_shards, shard_id=args.shard_id)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False,
                         num_workers=args.num_workers, collate_fn=collate_fn)
     print(f"#images = {len(dataset)}")
@@ -221,20 +244,19 @@ def main(args):
             json.dump(results, f)
         print(f"Saved detections -> {args.out}")
 
-    # ----- LVIS eval -----
-    lvis_dt = LVISResults(lvis_api, results, max_dets=300)
-    lvis_eval = LVISEval(lvis_api, lvis_dt, "bbox")
-    lvis_eval.params.img_ids = dataset.ids   # chỉ chấm trên các ảnh đã chạy
-    lvis_eval.run()
-    lvis_eval.print_results()
+    if args.skip_eval:
+        print("skip_eval: chi luu detections, khong eval (de gop o buoc sau).")
+        return
+
+    run_eval(lvis_api, results, dataset.ids)
 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser("Grounding DINO eval on LVIS")
-    p.add_argument("--config_file", "-c", type=str, required=True)
-    p.add_argument("--checkpoint_path", "-p", type=str, required=True)
+    p.add_argument("--config_file", "-c", type=str, default=None)
+    p.add_argument("--checkpoint_path", "-p", type=str, default=None)
     p.add_argument("--anno_path", type=str, required=True, help="LVIS json (val hoặc minival)")
-    p.add_argument("--image_root", type=str, required=True,
+    p.add_argument("--image_root", type=str, default=None,
                    help="thư mục chứa train2017/ và val2017/ (vd .../coco2017)")
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--num_select", type=int, default=300)
@@ -244,4 +266,13 @@ if __name__ == "__main__":
     p.add_argument("--max_images", type=int, default=None,
                    help="chỉ chạy N ảnh đầu (để test nhanh)")
     p.add_argument("--out", type=str, default=None, help="lưu detections ra json")
+    # da-GPU: chia anh thanh num_shards phan, moi process chay 1 shard_id
+    p.add_argument("--num_shards", type=int, default=1)
+    p.add_argument("--shard_id", type=int, default=0)
+    p.add_argument("--skip_eval", action="store_true",
+                   help="chi inference + luu --out, khong eval (de gop sau)")
+    p.add_argument("--eval_only", action="store_true",
+                   help="bo qua inference, nap --dets roi eval")
+    p.add_argument("--dets", type=str, nargs="+", default=None,
+                   help="danh sach file detections json de gop khi --eval_only")
     main(p.parse_args())
