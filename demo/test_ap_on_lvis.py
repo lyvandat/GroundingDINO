@@ -22,7 +22,7 @@ import groundingdino.datasets.transforms as T
 from groundingdino.util import box_ops, get_tokenlizer
 from groundingdino.util.misc import clean_state_dict, collate_fn
 from groundingdino.util.slconfig import SLConfig
-from groundingdino.util.vl_utils import build_captions_and_token_span, create_positive_map_from_span
+from groundingdino.util.vl_utils import create_positive_map_from_span
 
 from lvis import LVIS, LVISEval, LVISResults
 
@@ -89,12 +89,35 @@ def build_chunks(cat_names, cat_ids, tokenizer, max_tokens=250):
     return chunks
 
 
+def build_caption_and_spans(names):
+    """Tu build caption + char-span theo INDEX, KHONG dung build_captions_and_token_span
+    de tranh KeyError (do lowercase) va non-determinism (do random.choice khi ten co '/').
+    Tra ve caption va spans[i] = list cac [beg, end] cua category thu i (khop theo thu tu)."""
+    caption = ""
+    spans = []
+    for name in names:
+        class_name = name.replace("/", " ").strip().lower()
+        toks = []
+        for sub in class_name.split(" "):
+            sub = sub.strip()
+            if len(sub) == 0:
+                continue
+            if len(caption) > 0:
+                caption = caption + " "
+            start = len(caption)
+            end = start + len(sub)
+            toks.append([start, end])
+            caption = caption + sub
+        caption = caption + " ."
+        spans.append(toks)
+    return caption, spans
+
+
 def build_chunk_posmaps(chunks, tokenizer):
     """Tiền tính (caption, positive_map, lvis_cat_ids) cho từng chunk — không phụ thuộc ảnh."""
     out = []
     for names, ids in chunks:
-        caption, cat2span = build_captions_and_token_span(names, True)
-        spans = [cat2span[n] for n in names]
+        caption, spans = build_caption_and_spans(names)
         pm = create_positive_map_from_span(tokenizer(caption), spans)  # (len(names), 256)
         out.append((caption, pm, ids))
     return out
