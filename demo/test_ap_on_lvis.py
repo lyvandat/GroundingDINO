@@ -13,6 +13,13 @@ import os
 import time
 import json
 
+import numpy as np
+
+# lvis-api cu dung np.float/np.int/... da bi xoa khoi numpy moi (>=1.24) -> them alias lai
+for _name, _py in {"float": float, "int": int, "bool": bool, "object": object}.items():
+    if not hasattr(np, _name):
+        setattr(np, _name, _py)
+
 import torch
 from PIL import Image
 from torch.utils.data import DataLoader
