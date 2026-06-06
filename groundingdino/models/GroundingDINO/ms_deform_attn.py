@@ -327,7 +327,7 @@ class MultiScaleDeformableAttention(nn.Module):
                 )
             )
     
-        if torch.cuda.is_available() and value.is_cuda:
+        if False:
             halffloat = False
             if value.dtype == torch.float16:
                 halffloat = True
